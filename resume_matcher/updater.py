@@ -143,25 +143,28 @@ class ResumeUpdater:
         if not experience:
             return
 
+        # Prefer structured entries if available
+        entries = experience.get("entries")
+        if entries:
+            self._update_experience_entries(entries, exp_keywords, result)
+            return
+
+        # Fallback: flat content update (legacy data without entries)
         content = experience.get("content", [])
         if not content:
             return
 
-        # Try to weave keywords into existing bullet points
         keywords_used: list[str] = []
         updated_content: list[str] = []
 
         for line in content:
             updated_line = line
-            # Check if this is a bullet point (not a job title line)
             is_bullet = not re.match(
                 r"^[A-Z][\w\s]+\s*[—\-–]\s*\w", line
             )
             if is_bullet and exp_keywords:
-                # Try to naturally append a relevant keyword
                 for kw in list(exp_keywords):
                     if kw.lower() not in line.lower() and kw not in keywords_used:
-                        # Add keyword context to bullet point
                         updated_line = self._enhance_bullet(line, kw)
                         if updated_line != line:
                             keywords_used.append(kw)
@@ -171,6 +174,37 @@ class ResumeUpdater:
             updated_content.append(updated_line)
 
         experience["content"] = updated_content
+        if keywords_used:
+            result.keywords_added.extend(keywords_used)
+            result.changes_made.append(
+                f"Enhanced {len(keywords_used)} experience bullets with keywords: "
+                f"{', '.join(keywords_used[:10])}"
+            )
+
+    def _update_experience_entries(
+        self, entries: list[dict], exp_keywords: list[str], result: UpdateResult
+    ) -> None:
+        """Update structured experience entries — only modifies bullets, preserves company/title/dates."""
+        keywords_used: list[str] = []
+
+        for entry in entries:
+            bullets = entry.get("bullets", [])
+            updated_bullets: list[str] = []
+
+            for bullet in bullets:
+                updated = bullet
+                if exp_keywords:
+                    for kw in list(exp_keywords):
+                        if kw.lower() not in bullet.lower() and kw not in keywords_used:
+                            updated = self._enhance_bullet(bullet, kw)
+                            if updated != bullet:
+                                keywords_used.append(kw)
+                                exp_keywords.remove(kw)
+                                break
+                updated_bullets.append(updated)
+
+            entry["bullets"] = updated_bullets
+
         if keywords_used:
             result.keywords_added.extend(keywords_used)
             result.changes_made.append(

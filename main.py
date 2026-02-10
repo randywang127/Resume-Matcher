@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
@@ -114,6 +115,24 @@ def _get_job_data(job_id: str | None, job_dict: dict | None) -> dict:
     raise HTTPException(400, "Provide either 'job_id' or 'job' data.")
 
 
+ALLOWED_EXTENSIONS = {".docx", ".pdf"}
+MAX_UPLOAD_SIZE = 20 * 1024 * 1024  # 20 MB
+
+
+def _get_file_ext(filename: str | None) -> str:
+    """Validate filename and return its extension, or raise 400."""
+    if not filename:
+        raise HTTPException(400, "Filename is required.")
+    ext = os.path.splitext(filename)[1].lower()
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            400,
+            f"Only .docx and .pdf files are supported (got '{ext}'). "
+            "Please upload a Word document or PDF.",
+        )
+    return ext
+
+
 # ── Endpoints ───────────────────────────────────────────────────
 
 
@@ -125,20 +144,22 @@ async def health():
 
 @app.post("/parse-resume")
 async def parse_resume(file: UploadFile = File(...)):
-    """Upload a .docx resume and get back structured JSON.
+    """Upload a .docx or .pdf resume and get back structured JSON.
 
     The parsed result is saved and a `resume_id` is returned.
     Use this ID in subsequent calls to /ats-check, /analyze, etc.
     """
-    if not file.filename or not file.filename.lower().endswith(".docx"):
-        raise HTTPException(
-            status_code=400,
-            detail="Only .docx files are supported. Please upload a Word document.",
-        )
+    ext = _get_file_ext(file.filename)
 
     try:
         contents = await file.read()
-        result = parser.parse_bytes(contents)
+        if len(contents) > MAX_UPLOAD_SIZE:
+            raise HTTPException(413, "File too large. Maximum size is 20 MB.")
+        result = parser.parse_file(contents, file.filename)
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
     except Exception as exc:
         raise HTTPException(
             status_code=422, detail=f"Failed to parse the document: {exc}"
@@ -150,15 +171,15 @@ async def parse_resume(file: UploadFile = File(...)):
     db = get_db()
     try:
         record = ResumeRecord(
-            filename=file.filename or "resume.docx",
+            filename=file.filename or f"resume{ext}",
             parsed_json=json.dumps(parsed_dict),
             raw_text=parsed_dict.get("raw_text", ""),
         )
         db.add(record)
         db.flush()  # get the generated ID
 
-        # Store original .docx file
-        file_path = file_storage.save("uploads", record.id, contents)
+        # Store original file
+        file_path = file_storage.save("uploads", record.id, contents, ext=ext)
         record.file_path = file_path
         db.commit()
 
@@ -174,23 +195,28 @@ async def ats_check(
     file: UploadFile | None = File(None),
     resume_id: str | None = Form(None),
 ):
-    """ATS compliance check. Upload a .docx or provide a resume_id.
+    """ATS compliance check. Upload a .docx/.pdf or provide a resume_id.
 
     Returns a score (0-100), list of issues, and heading suggestions.
     """
     if file and file.filename:
-        if not file.filename.lower().endswith(".docx"):
-            raise HTTPException(400, "Only .docx files are supported.")
+        _get_file_ext(file.filename)
         try:
             contents = await file.read()
-            parsed = parser.parse_bytes(contents)
+            if len(contents) > MAX_UPLOAD_SIZE:
+                raise HTTPException(413, "File too large. Maximum size is 20 MB.")
+            parsed = parser.parse_file(contents, file.filename)
             parsed_dict = parsed.to_dict()
+        except HTTPException:
+            raise
+        except ValueError as exc:
+            raise HTTPException(422, str(exc))
         except Exception as exc:
             raise HTTPException(422, f"Failed to parse the document: {exc}")
     elif resume_id:
         parsed_dict = _get_resume_data(resume_id, None)
     else:
-        raise HTTPException(400, "Provide a .docx file or a resume_id.")
+        raise HTTPException(400, "Provide a .docx/.pdf file or a resume_id.")
 
     report = ats_optimizer.check(parsed_dict)
     return report.to_dict()
@@ -358,7 +384,7 @@ async def optimize(
     """Full pipeline: get back an optimized .docx.
 
     Resume input (pick one):
-      - Upload a .docx file
+      - Upload a .docx or .pdf file
       - Provide `resume_id` from a previous /parse-resume call
 
     Job input (pick one):
@@ -371,21 +397,27 @@ async def optimize(
     # ── Resolve resume ──────────────────────────────────────────
     contents: bytes | None = None
     existing_resume_id: str | None = None
+    upload_ext: str = ".docx"
 
     if file and file.filename:
-        if not file.filename.lower().endswith(".docx"):
-            raise HTTPException(400, "Only .docx files are supported.")
+        upload_ext = _get_file_ext(file.filename)
         try:
             contents = await file.read()
-            parsed_resume = parser.parse_bytes(contents)
+            if len(contents) > MAX_UPLOAD_SIZE:
+                raise HTTPException(413, "File too large. Maximum size is 20 MB.")
+            parsed_resume = parser.parse_file(contents, file.filename)
             resume_dict = parsed_resume.to_dict()
+        except HTTPException:
+            raise
+        except ValueError as exc:
+            raise HTTPException(422, str(exc))
         except Exception as exc:
             raise HTTPException(422, f"Failed to parse resume: {exc}")
     elif resume_id:
         existing_resume_id = resume_id
         resume_dict = _get_resume_data(resume_id, None)
     else:
-        raise HTTPException(400, "Provide a .docx file or a resume_id.")
+        raise HTTPException(400, "Provide a .docx/.pdf file or a resume_id.")
 
     # ── Resolve job description ─────────────────────────────────
     existing_job_id: str | None = None
@@ -423,15 +455,15 @@ async def optimize(
             rid = existing_resume_id
         else:
             resume_rec = ResumeRecord(
-                filename=(file.filename if file else "resume.docx"),
+                filename=(file.filename if file else f"resume{upload_ext}"),
                 parsed_json=json.dumps(resume_dict),
                 raw_text=resume_dict.get("raw_text", ""),
             )
             db.add(resume_rec)
             db.flush()
             if contents:
-                file_storage.save("uploads", resume_rec.id, contents)
-                resume_rec.file_path = f"uploads/{resume_rec.id}.docx"
+                file_storage.save("uploads", resume_rec.id, contents, ext=upload_ext)
+                resume_rec.file_path = f"uploads/{resume_rec.id}{upload_ext}"
             rid = resume_rec.id
 
         # Job: reuse existing or create new

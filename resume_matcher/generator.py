@@ -133,7 +133,7 @@ class ResumeGenerator:
 
         # Content
         if category == "experience":
-            self._render_experience(doc, content)
+            self._render_experience(doc, content, entries=data.get("entries"))
         elif category == "skills":
             self._render_skills(doc, content)
         else:
@@ -143,12 +143,16 @@ class ResumeGenerator:
                 run = para.add_run(line)
                 run.font.size = Pt(10)
 
-    def _render_experience(self, doc: Document, content: list[str]) -> None:
-        """Render experience section with job titles and bullets."""
+    def _render_experience(self, doc: Document, content: list[str], entries: list[dict] | None = None) -> None:
+        """Render experience section with structured entries or flat content fallback."""
+        if entries:
+            self._render_experience_entries(doc, entries)
+            return
+
+        # Fallback: flat content rendering (legacy data without entries)
         import re
 
         for line in content:
-            # Detect job title lines (e.g., "Title — Company (Date)")
             is_title = bool(
                 re.match(r"^[A-Z][\w\s]+\s*[—\-–]\s*\w", line)
             )
@@ -160,11 +164,51 @@ class ResumeGenerator:
                 run.bold = True
                 run.font.size = Pt(10)
             else:
-                # Bullet point
                 para = doc.add_paragraph(style="List Bullet")
                 para.paragraph_format.space_after = Pt(1)
                 para.paragraph_format.left_indent = Inches(0.25)
                 run = para.add_run(line)
+                run.font.size = Pt(10)
+
+    def _render_experience_entries(self, doc: Document, entries: list[dict]) -> None:
+        """Render structured experience entries with company, title, dates, and bullets."""
+        for entry in entries:
+            company = entry.get("company", "")
+            title = entry.get("title", "")
+            location = entry.get("location", "")
+            dates = entry.get("dates", "")
+            bullets = entry.get("bullets", [])
+
+            # Company + Location line
+            if company:
+                company_line = company
+                if location:
+                    company_line += f"  |  {location}"
+                para = doc.add_paragraph()
+                para.paragraph_format.space_before = Pt(6)
+                para.paragraph_format.space_after = Pt(0)
+                run = para.add_run(company_line)
+                run.bold = True
+                run.font.size = Pt(10)
+
+            # Title + Dates line
+            if title or dates:
+                title_line = title if title else ""
+                if dates:
+                    title_line += f"  |  {dates}" if title_line else dates
+                para = doc.add_paragraph()
+                para.paragraph_format.space_before = Pt(0)
+                para.paragraph_format.space_after = Pt(1)
+                run = para.add_run(title_line)
+                run.italic = True
+                run.font.size = Pt(10)
+
+            # Bullets
+            for bullet in bullets:
+                para = doc.add_paragraph(style="List Bullet")
+                para.paragraph_format.space_after = Pt(1)
+                para.paragraph_format.left_indent = Inches(0.25)
+                run = para.add_run(bullet)
                 run.font.size = Pt(10)
 
     def _render_skills(self, doc: Document, content: list[str]) -> None:
