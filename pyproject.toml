@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "resume-matcher"
-version = "0.1.0"
-description = "Local API to parse, optimize, and tailor resumes to job descriptions"
+version = "0.2.0"
+description = "LLM-powered resume optimizer: parse, ATS-transform, score, tailor, cover letters, and Q&A"
 requires-python = ">=3.10"
 dependencies = [
     "fastapi>=0.115.0",
@@ -17,6 +17,8 @@ dependencies = [
     "lxml>=5.0.0",
     "sqlalchemy>=2.0.0",
     "pdfplumber>=0.10.0",
+    "pydantic-settings>=2.0.0",
+    "google-genai>=1.0.0",
 ]
 
 [tool.setuptools.packages.find]

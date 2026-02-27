@@ -11,20 +11,40 @@ class MatchReport:
     """Result of comparing a resume against a job description."""
 
     overall_score: float = 0.0  # 0-100
+    keyword_score: float = 0.0  # 0-100 (rule-based)
+    llm_score: float = 0.0  # 0-100 (LLM semantic)
     matching_keywords: list[str] = field(default_factory=list)
     missing_keywords: list[str] = field(default_factory=list)
     # Which resume section each missing keyword should go into
     keyword_placement: dict[str, str] = field(default_factory=dict)
     recommendations: list[str] = field(default_factory=list)
+    # LLM-powered analysis
+    dimension_scores: dict[str, float] = field(default_factory=dict)
+    strengths: list[str] = field(default_factory=list)
+    gaps: list[str] = field(default_factory=list)
+    llm_explanation: str = ""
 
     def to_dict(self) -> dict:
-        return {
+        result = {
             "overall_score": round(self.overall_score, 1),
+            "keyword_score": round(self.keyword_score, 1),
             "matching_keywords": self.matching_keywords,
             "missing_keywords": self.missing_keywords,
             "keyword_placement": self.keyword_placement,
             "recommendations": self.recommendations,
         }
+        # Include LLM fields only when populated
+        if self.llm_score:
+            result["llm_score"] = round(self.llm_score, 1)
+        if self.dimension_scores:
+            result["dimension_scores"] = self.dimension_scores
+        if self.strengths:
+            result["strengths"] = self.strengths
+        if self.gaps:
+            result["gaps"] = self.gaps
+        if self.llm_explanation:
+            result["llm_explanation"] = self.llm_explanation
+        return result
 
 
 # Common filler words to ignore during keyword extraction
@@ -159,11 +179,12 @@ class MatchAnalyzer:
         report.matching_keywords = sorted(matching)
         report.missing_keywords = sorted(missing)
 
-        # Calculate score
+        # Calculate keyword-based score
         if jd_important:
-            report.overall_score = (len(matching) / len(jd_important)) * 100
+            report.keyword_score = (len(matching) / len(jd_important)) * 100
         else:
-            report.overall_score = 0.0
+            report.keyword_score = 0.0
+        report.overall_score = report.keyword_score
 
         # Suggest where to place missing keywords
         report.keyword_placement = self._suggest_placement(
@@ -174,6 +195,82 @@ class MatchAnalyzer:
         report.recommendations = self._generate_recommendations(report)
 
         return report
+
+    def analyze_with_llm(
+        self, resume_data: dict, job_data: dict
+    ) -> MatchReport:
+        """Analyze with keyword matching + LLM semantic scoring.
+
+        Combines keyword-based score (30%) with LLM semantic score (70%)
+        for a more accurate overall assessment.
+        """
+        import json
+        import logging
+
+        from resume_matcher.llm_client import get_llm_client
+        from resume_matcher.prompts import MATCH_SCORE_SYSTEM, MATCH_SCORE_USER
+
+        logger = logging.getLogger(__name__)
+
+        # First run the keyword-based analysis
+        report = self.analyze(resume_data, job_data)
+
+        # Then add LLM scoring
+        try:
+            client = get_llm_client()
+            prompt = MATCH_SCORE_USER.format(
+                resume_json=json.dumps(resume_data, indent=2)[:6000],
+                job_json=json.dumps(job_data, indent=2)[:4000],
+            )
+            llm_result = client.complete_json(MATCH_SCORE_SYSTEM, prompt)
+
+            report.llm_score = float(llm_result.get("overall_score", 0))
+            report.dimension_scores = llm_result.get("dimension_scores", {})
+            report.strengths = llm_result.get("strengths", [])
+            report.gaps = llm_result.get("gaps", [])
+            report.llm_explanation = llm_result.get("explanation", "")
+
+            # Hybrid score: 30% keyword + 70% LLM
+            report.overall_score = (
+                report.keyword_score * 0.3 + report.llm_score * 0.7
+            )
+
+        except Exception as exc:
+            logger.warning("LLM scoring failed, using keyword-only: %s", exc)
+            # overall_score stays as keyword_score from the rule-based pass
+
+        return report
+
+    @staticmethod
+    def evaluate_feasibility(
+        score: float,
+        threshold_min: float = 30.0,
+        threshold_warn: float = 50.0,
+    ) -> dict:
+        """Evaluate whether a resume-job gap is too large to tailor.
+
+        Returns:
+            dict with 'feasible' (bool), optional 'reason' or 'warning'.
+        """
+        if score < threshold_min:
+            return {
+                "feasible": False,
+                "reason": (
+                    f"Match score ({score:.0f}%) is below the minimum threshold "
+                    f"({threshold_min:.0f}%). This job requires skills or experience "
+                    "significantly different from your background. Tailoring would "
+                    "require fabricating qualifications."
+                ),
+            }
+        if score < threshold_warn:
+            return {
+                "feasible": True,
+                "warning": (
+                    f"Low match ({score:.0f}%). The resume tailoring will be "
+                    "aggressive but will not fabricate experience."
+                ),
+            }
+        return {"feasible": True}
 
     def _sections_to_text(self, sections: dict) -> str:
         """Flatten all resume sections into a single text string."""

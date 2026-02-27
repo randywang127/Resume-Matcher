@@ -61,18 +61,30 @@ class ParsedJobDescription:
 
     title: str = ""
     company: str = ""
+    company_background: str = ""
+    location: str = ""
+    salary_range: str = ""
     raw_text: str = ""
     sections: dict[str, list[str]] = field(default_factory=dict)
     # Flat list of all requirement/qualification lines
     all_requirements: list[str] = field(default_factory=list)
+    required_qualifications: list[str] = field(default_factory=list)
+    preferred_qualifications: list[str] = field(default_factory=list)
+    responsibilities: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
             "title": self.title,
             "company": self.company,
+            "company_background": self.company_background,
+            "location": self.location,
+            "salary_range": self.salary_range,
             "raw_text": self.raw_text,
             "sections": self.sections,
             "all_requirements": self.all_requirements,
+            "required_qualifications": self.required_qualifications,
+            "preferred_qualifications": self.preferred_qualifications,
+            "responsibilities": self.responsibilities,
         }
 
 
@@ -177,6 +189,52 @@ class JobDescriptionExtractor:
             first = lines[0]
             if len(first) < 100 and not self._match_section(first):
                 result.title = first
+
+        return result
+
+    def enhance_with_llm(self, result: ParsedJobDescription) -> ParsedJobDescription:
+        """Use LLM to extract structured fields from the raw job text.
+
+        Enhances the result with company_background, separated required vs
+        preferred qualifications, location, and salary. Falls back gracefully
+        if the LLM is unavailable.
+        """
+        import json
+        import logging
+
+        from resume_matcher.llm_client import get_llm_client
+        from resume_matcher.prompts import JOB_EXTRACT_SYSTEM, JOB_EXTRACT_USER
+
+        logger = logging.getLogger(__name__)
+
+        try:
+            client = get_llm_client()
+            prompt = JOB_EXTRACT_USER.format(job_text=result.raw_text[:8000])
+            data = client.complete_json(JOB_EXTRACT_SYSTEM, prompt)
+
+            # Merge LLM results into existing result (LLM wins for new fields,
+            # existing regex results are kept as fallback for sections)
+            if data.get("title") and not result.title:
+                result.title = data["title"]
+            if data.get("company_name"):
+                result.company = data["company_name"]
+            if data.get("company_background"):
+                result.company_background = data["company_background"]
+            if data.get("location"):
+                result.location = data["location"]
+            if data.get("salary_range"):
+                result.salary_range = data["salary_range"]
+            if data.get("required_qualifications"):
+                result.required_qualifications = data["required_qualifications"]
+            if data.get("preferred_qualifications"):
+                result.preferred_qualifications = data["preferred_qualifications"]
+            if data.get("responsibilities"):
+                result.responsibilities = data["responsibilities"]
+            if data.get("all_requirements") and not result.all_requirements:
+                result.all_requirements = data["all_requirements"]
+
+        except Exception as exc:
+            logger.warning("LLM job extraction failed, using regex results: %s", exc)
 
         return result
 

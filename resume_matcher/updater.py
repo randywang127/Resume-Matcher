@@ -1,12 +1,19 @@
-"""Resume Updater: modifies resume content to better match a job description."""
+"""Resume Updater: modifies resume content to better match a job description.
+
+Supports both rule-based (legacy) and LLM-powered tailoring.
+"""
 
 from __future__ import annotations
 
+import json
+import logging
 import re
 from copy import deepcopy
 from dataclasses import dataclass, field
 
 from resume_matcher.ats_optimizer import ATS_STANDARD_SECTIONS, HEADING_RENAMES
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -61,6 +68,51 @@ class ResumeUpdater:
         self._update_summary(sections, match_report, result)
 
         result.updated_sections = sections
+        return result
+
+    def update_with_llm(
+        self,
+        resume_data: dict,
+        job_data: dict,
+        match_report: dict,
+    ) -> UpdateResult:
+        """LLM-powered resume tailoring — makes minor, intelligent edits.
+
+        Falls back to rule-based update() if the LLM call fails.
+        """
+        from resume_matcher.llm_client import get_llm_client
+        from resume_matcher.prompts import TAILOR_SYSTEM, TAILOR_USER
+
+        result = UpdateResult()
+
+        try:
+            client = get_llm_client()
+            prompt = TAILOR_USER.format(
+                resume_json=json.dumps(resume_data, indent=2),
+                job_json=json.dumps(job_data, indent=2)[:4000],
+                match_analysis=json.dumps({
+                    "missing_keywords": match_report.get("missing_keywords", [])[:20],
+                    "gaps": match_report.get("gaps", []),
+                    "recommendations": match_report.get("recommendations", []),
+                }, indent=2),
+            )
+            tailored = client.complete_json(TAILOR_SYSTEM, prompt)
+
+            # Extract changes_made from LLM response
+            changes = tailored.pop("changes_made", [])
+
+            if "sections" not in tailored:
+                raise ValueError("LLM returned invalid structure (missing 'sections')")
+
+            result.updated_sections = tailored.get("sections", {})
+            result.changes_made = changes if isinstance(changes, list) else [str(changes)]
+
+        except Exception as exc:
+            logger.warning("LLM tailoring failed, falling back to rule-based: %s", exc)
+            # Fall back to the mechanical approach
+            fallback = self.update(resume_data, match_report)
+            return fallback
+
         return result
 
     def _fix_headings(
